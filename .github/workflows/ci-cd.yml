@@ -13,6 +13,13 @@ on:
 permissions:
   contents: read
 
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: cloud-portfolio-api
+  ECS_CLUSTER: aws-ecs-fargate-deployment-cluster
+  ECS_SERVICE: aws-ecs-fargate-deployment-api-service
+  CONTAINER_NAME: api
+
 jobs:
   test:
     name: Test and Build
@@ -37,7 +44,7 @@ jobs:
         run: |
           python -m pytest -v
 
-      - name: Build Docker image
+      - name: Build Docker image for CI
         run: |
           docker build -t cloud-portfolio-api:ci .
 
@@ -59,12 +66,12 @@ jobs:
           ROLE_ARN: ${{ vars.AWS_ROLE_TO_ASSUME }}
         run: |
           if [ -z "$ROLE_ARN" ]; then
-            echo "::error::AWS_ROLE_TO_ASSUME is empty or unavailable"
+            echo "::error::AWS_ROLE_TO_ASSUME is missing"
             exit 1
           fi
 
           if [[ ! "$ROLE_ARN" =~ ^arn:aws:iam::[0-9]{12}:role/.+ ]]; then
-            echo "::error::AWS_ROLE_TO_ASSUME is not a valid-looking IAM role ARN"
+            echo "::error::Invalid IAM role ARN format"
             exit 1
           fi
 
@@ -74,10 +81,103 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v6.3.0
         with:
           role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_REGION }}
           role-session-name: GitHubActionsOIDCTest
           retry-max-attempts: 2
 
       - name: Verify AWS identity
         run: |
           aws sts get-caller-identity
+
+  deploy:
+    name: Deploy FastAPI to ECS Fargate
+    runs-on: ubuntu-latest
+
+    needs:
+      - test
+      - oidc-test
+
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: read
+      id-token: write
+
+    concurrency:
+      group: project4-ecs-deployment
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActionsECSDeploy
+          retry-max-attempts: 2
+
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image to ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          docker build --platform linux/amd64 -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+
+          echo "image=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+      - name: Read current ECS task definition
+        id: current-task
+        run: |
+          TASK_ARN=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --query "services[0].taskDefinition" \
+            --output text)
+
+          if [ -z "$TASK_ARN" ] || [ "$TASK_ARN" = "None" ]; then
+            echo "::error::No ECS task definition found"
+            exit 1
+          fi
+
+          echo "arn=$TASK_ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Render new task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition-arn: ${{ steps.current-task.outputs.arn }}
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.build-image.outputs.image }}
+
+      - name: Deploy to ECS Fargate
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          wait-for-minutes: 15
+          wait-max-delay-seconds: 15
+
+      - name: Show deployed task definition
+        run: |
+          aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --query "services[0].taskDefinition" \
+            --output text
