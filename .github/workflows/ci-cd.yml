@@ -52,8 +52,9 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    
-          - name: Validate AWS role configuration
+
+    steps:
+      - name: Validate AWS role configuration
         env:
           ROLE_ARN: ${{ vars.AWS_ROLE_TO_ASSUME }}
         run: |
@@ -69,13 +70,13 @@ jobs:
 
           echo "AWS role variable is configured."
 
-    steps:
       - name: Configure AWS credentials using OIDC
         uses: aws-actions/configure-aws-credentials@v6.3.0
         with:
           role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
           aws-region: us-east-1
           role-session-name: GitHubActionsOIDCTest
+          retry-max-attempts: 2
 
       - name: Verify AWS identity
         run: |
