@@ -52,6 +52,22 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    
+          - name: Validate AWS role configuration
+        env:
+          ROLE_ARN: ${{ vars.AWS_ROLE_TO_ASSUME }}
+        run: |
+          if [ -z "$ROLE_ARN" ]; then
+            echo "::error::AWS_ROLE_TO_ASSUME is empty or unavailable"
+            exit 1
+          fi
+
+          if [[ ! "$ROLE_ARN" =~ ^arn:aws:iam::[0-9]{12}:role/.+ ]]; then
+            echo "::error::AWS_ROLE_TO_ASSUME is not a valid-looking IAM role ARN"
+            exit 1
+          fi
+
+          echo "AWS role variable is configured."
 
     steps:
       - name: Configure AWS credentials using OIDC
